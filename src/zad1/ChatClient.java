@@ -17,17 +17,17 @@ import java.util.concurrent.LinkedBlockingQueue;
 public class ChatClient {
     private String host;
     private int port;
-    private String clientId;
+    private String id;
     private SocketChannel channel;
     private StringBuilder chatView;
-    private BlockingQueue<String> messageQueue;
-    private Thread readThread;
+    private Thread readerThread;
     private volatile boolean running;
+    private BlockingQueue<String> messageQueue;
 
     public ChatClient(String host, int port, String id) {
         this.host = host;
         this.port = port;
-        this.clientId = id;
+        this.id = id;
         this.chatView = new StringBuilder();
         this.messageQueue = new LinkedBlockingQueue<>();
     }
@@ -36,39 +36,41 @@ public class ChatClient {
         try {
             channel = SocketChannel.open(new InetSocketAddress(host, port));
             channel.configureBlocking(false);
-            send("LOGIN " + clientId);
-
             running = true;
-            readThread = new Thread(this::readMessages);
-            readThread.start();
+            readerThread = new Thread(this::readMessages);
+            readerThread.start();
+            send("LOGIN|" + id);
         } catch (IOException e) {
-            chatView.append("*** ").append(e.toString()).append("\n");
+            handleError(e);
         }
     }
 
     public void logout() {
         try {
-            send("LOGOUT");
-            running = false;
-            if (channel != null) {
+            if (channel != null && channel.isOpen()) {
+                send("LOGOUT|");
+                running = false;
                 channel.close();
+                if (readerThread != null) {
+                    readerThread.join();
+                }
             }
-            if (readThread != null) {
-                readThread.interrupt();
-            }
-        } catch (IOException e) {
-            chatView.append("*** ").append(e.toString()).append("\n");
+        } catch (IOException | InterruptedException e) {
+            handleError(e);
         }
     }
 
-    public void send(String req) {
+    public void send(String message) {
         try {
-            ByteBuffer buffer = ByteBuffer.wrap(req.getBytes(StandardCharsets.UTF_8));
+            if (!message.startsWith("LOGIN|") && !message.startsWith("LOGOUT|")) {
+                message = "MESSAGE|" + message;
+            }
+            ByteBuffer buffer = ByteBuffer.wrap(message.getBytes(StandardCharsets.UTF_8));
             while (buffer.hasRemaining()) {
                 channel.write(buffer);
             }
         } catch (IOException e) {
-            chatView.append("*** ").append(e.toString()).append("\n");
+            handleError(e);
         }
     }
 
@@ -89,22 +91,32 @@ public class ChatClient {
                     int newlineIndex;
                     while ((newlineIndex = messageBuilder.indexOf("\n")) != -1) {
                         String message = messageBuilder.substring(0, newlineIndex);
-                        chatView.append(message).append("\n");
+                        messageQueue.put(message);
+                        addToChatView(message);
                         messageBuilder.delete(0, newlineIndex + 1);
                     }
                 }
 
-                Thread.sleep(100);
+                Thread.sleep(10);
             } catch (IOException | InterruptedException e) {
                 if (running) {
-                    chatView.append("*** ").append(e.toString()).append("\n");
+                    handleError(e);
                 }
                 break;
             }
         }
     }
 
+    private synchronized void addToChatView(String message) {
+        chatView.append(message).append("\n");
+    }
+
+    private void handleError(Exception e) {
+        String error = "*** " + e.toString();
+        addToChatView(error);
+    }
+
     public String getChatView() {
-        return "=== " + clientId + " chat view\n" + chatView.toString();
+        return "=== " + id + " chat view\n" + chatView.toString();
     }
 }

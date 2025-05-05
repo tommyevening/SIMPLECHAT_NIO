@@ -7,7 +7,6 @@
 package zad1;
 
 import java.util.List;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
@@ -22,17 +21,12 @@ public class ChatClientTask implements Runnable {
         this.wait = wait;
     }
 
-    public static ChatClientTask create(ChatClient c, List<String> msgs, int wait) {
-        return new ChatClientTask(c, msgs, wait);
-    }
-
-    public ChatClient getClient() {
-        return client;
+    public static ChatClientTask create(ChatClient client, List<String> messages, int wait) {
+        return new ChatClientTask(client, messages, wait);
     }
 
     @Override
-    public void run(){
-
+    public void run() {
         try {
             client.login();
             if (wait != 0) TimeUnit.MILLISECONDS.sleep(wait);
@@ -44,12 +38,21 @@ public class ChatClientTask implements Runnable {
 
             client.logout();
             if (wait != 0) TimeUnit.MILLISECONDS.sleep(wait);
+
         } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+            Thread.currentThread().interrupt();
         }
     }
 
+    public ChatClient getClient() {
+        return client;
+    }
+
     public void get() throws InterruptedException, ExecutionException {
-        client.getChatView();
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            throw new ExecutionException(e);
+        }
     }
 }

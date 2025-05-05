@@ -4,141 +4,191 @@
 
 package zad1;
 
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ChatServer extends Thread {
-
     private String host;
     private int port;
-    private ServerSocketChannel serverSocketChannel;
+    private ServerSocketChannel serverChannel;
     private Selector selector;
     private volatile boolean running;
-
+    private StringBuilder serverLog;
+    private Map<SocketChannel, String> clients;
+    private SimpleDateFormat timeFormat;
 
     public ChatServer(String host, int port) {
         this.host = host;
         this.port = port;
-
+        this.serverLog = new StringBuilder();
+        this.clients = new ConcurrentHashMap<>();
+        this.timeFormat = new SimpleDateFormat("HH:mm:ss.SSS");
     }
 
     public void startServer() {
-        running = true;
-
-        this.start();
         try {
-            Thread.sleep(1);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+            selector = Selector.open();
+            serverChannel = ServerSocketChannel.open();
+            serverChannel.configureBlocking(false);
+            serverChannel.socket().bind(new InetSocketAddress(host, port));
+            serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+
+            running = true;
+            start();
+            System.out.println("Server started");
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 
     @Override
     public void run() {
-        try (ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
-            Selector selector = Selector.open()
-        ){
-            serverSocketChannel.configureBlocking(false);
-            serverSocketChannel.bind(new InetSocketAddress(host, port));
-            serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+        while (running) {
+            try {
+                selector.select();
+                if (!running) break;
 
-            while (running){
-                if (selector.select() == 0){
-                    continue;
-                }
+                Set<SelectionKey> selectedKeys = selector.selectedKeys();
+                Iterator<SelectionKey> iter = selectedKeys.iterator();
 
-                for (SelectionKey key : selector.selectedKeys()){
-                    try {
-                        if (!key.isValid()) continue;
+                while (iter.hasNext()) {
+                    SelectionKey key = iter.next();
+                    iter.remove();
 
-                        if (key.isAcceptable()) {
-                            if (key.channel() instanceof ServerSocketChannel) {
-                                SocketChannel socketChannel = ((ServerSocketChannel) key.channel()).accept();
-                                socketChannel.configureBlocking(false);
-                                socketChannel.register(selector, SelectionKey.OP_READ);
-                            }
-                        }
+                    if (!key.isValid()) continue;
 
-                        if (key.isReadable()) {
-                            SocketChannel socketChannel = (SocketChannel) key.channel();
-                            ByteBuffer buffer = ByteBuffer.allocate(1024);
-                            int read = socketChannel.read(buffer);
-                            if (read == -1) {
-                                socketChannel.close();
-                                key.cancel();
-                                continue;
-                            }
-                            buffer.flip();
-                            String request = new String(buffer.array(), UTF_8);
-                            String response = handleRequest(socketChannel, request);
-                            buffer.clear();
-                            buffer.put(response.getBytes(UTF_8));
-                            buffer.flip();
-                            socketChannel.write(buffer);
-                        }
-                    }catch (IOException e) {
-                        key.cancel(); //cancels key in selector, informs that we don't want to monitor that channel anymore
-                        try {
-                            key.channel().close(); //closes channel associated with key and disposes resources
-                        } catch (IOException ignored) {}
+                    if (key.isAcceptable()) {
+                        SocketChannel client = serverChannel.accept();
+                        client.configureBlocking(false);
+                        client.register(selector, SelectionKey.OP_READ);
                     }
 
+                    if (key.isReadable()) {
+                        SocketChannel client = (SocketChannel) key.channel();
+                        handleRead(client);
+                    }
                 }
-                selector.selectedKeys().clear();
-            }
-
             } catch (IOException e) {
-            throw new RuntimeException(e);
-        }finally {
-            closeServer();
+                if (running) {
+                    e.printStackTrace();
+                }
+            }
         }
     }
 
-    private void closeServer() {
-
-        try{
-            // Close all channels before closing the selector
-            if (selector != null) {
-                selector.selectedKeys().forEach(key -> {
-                    try {
-                        key.channel().close();
-                    } catch (IOException ignored) {}
-                });
-                selector.close();
+    private void handleRead(SocketChannel client) {
+        ByteBuffer buffer = ByteBuffer.allocate(1024);
+        try {
+            int bytesRead = client.read(buffer);
+            if (bytesRead == -1) {
+                removeClient(client);
+                return;
             }
 
-            if (serverSocketChannel != null) {
-                serverSocketChannel.close();
+            buffer.flip();
+            String message = StandardCharsets.UTF_8.decode(buffer).toString();
+            String[] parts = message.split("\\|");
+            String command = parts[0];
+            String content = parts.length > 1 ? parts[1] : "";
+
+            switch (command) {
+                case "LOGIN":
+                    handleLogin(client, content);
+                    break;
+                case "LOGOUT":
+                    handleLogout(client);
+                    break;
+                case "MESSAGE":
+                    broadcastMessage(client, content);
+                    break;
             }
-        }catch (IOException e) {
-            e.printStackTrace();
+        } catch (IOException e) {
+            removeClient(client);
         }
+    }
+
+    private void handleLogin(SocketChannel client, String clientId) {
+        clients.put(client, clientId);
+        String logMessage = clientId + " logged in";
+        logServerMessage(logMessage);
+        broadcastToAll(logMessage, null);
+    }
+
+    private void handleLogout(SocketChannel client) {
+        removeClient(client);
+    }
+
+    private void removeClient(SocketChannel client) {
+        String clientId = clients.remove(client);
+        if (clientId != null) {
+            try {
+                client.close();
+                String logMessage = clientId + " logged out";
+                logServerMessage(logMessage);
+                broadcastToAll(logMessage, client);
+            } catch (IOException ignored) {}
+        }
+    }
+
+    private void broadcastMessage(SocketChannel sender, String message) {
+        String clientId = clients.get(sender);
+        if (clientId != null) {
+            String fullMessage = clientId + ": " + message;
+            logServerMessage(fullMessage);
+            broadcastToAll(fullMessage, null);
+        }
+    }
+
+    private void broadcastToAll(String message, SocketChannel exclude) {
+        ByteBuffer buffer = ByteBuffer.wrap((message + "\n").getBytes(StandardCharsets.UTF_8));
+
+        for (SocketChannel client : new ArrayList<>(clients.keySet())) {
+            if (client.equals(exclude)) continue;
+
+            try {
+                buffer.rewind();
+                client.write(buffer);
+            } catch (IOException e) {
+                // Tylko oznaczamy klienta do usunięcia, nie usuwamy go w trakcie iteracji
+                clients.remove(client);
+            }
+        }
+    }
+
+    private void logServerMessage(String message) {
+        String timestamp = timeFormat.format(new Date());
+        serverLog.append(timestamp).append(" ").append(message).append("\n");
     }
 
     public void stopServer() {
         running = false;
-        if (selector != null) {
-            selector.wakeup();
-        }
         try {
-            this.join(1000);
-        } catch (InterruptedException e) {
+            // Zamykamy połączenia klientów
+            for (SocketChannel client : new ArrayList<>(clients.keySet())) {
+                removeClient(client);
+            }
+
+            if (selector != null) {
+                selector.wakeup();
+                selector.close();
+            }
+            if (serverChannel != null) {
+                serverChannel.close();
+            }
+            join();
+            System.out.println("\nServer stopped");
+        } catch (IOException | InterruptedException e) {
             e.printStackTrace();
         }
     }
 
-    public String handleRequest(SocketChannel channel, String request) {
-
-
-        return request;
-    }
-
     public String getServerLog() {
-        return "";
+        return serverLog.toString();
     }
 }

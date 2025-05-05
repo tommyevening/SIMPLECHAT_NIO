@@ -11,15 +11,13 @@ import java.nio.channels.*;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
 
-public class ChatServer {
+public class ChatServer extends Thread {
     private String host;
     private int port;
     private ServerSocketChannel serverChannel;
     private Selector selector;
-    private ExecutorService executor;
     private volatile boolean running;
     private StringBuilder serverLog;
     private Map<SocketChannel, String> clients;
@@ -29,7 +27,7 @@ public class ChatServer {
         this.host = host;
         this.port = port;
         this.serverLog = new StringBuilder();
-        this.clients = new HashMap<>();
+        this.clients = new ConcurrentHashMap<>();
         this.timeFormat = new SimpleDateFormat("HH:mm:ss.SSS");
     }
 
@@ -38,122 +36,153 @@ public class ChatServer {
             selector = Selector.open();
             serverChannel = ServerSocketChannel.open();
             serverChannel.configureBlocking(false);
-            serverChannel.bind(new InetSocketAddress(host, port));
+            serverChannel.socket().bind(new InetSocketAddress(host, port));
             serverChannel.register(selector, SelectionKey.OP_ACCEPT);
 
             running = true;
-            executor = Executors.newSingleThreadExecutor();
-            executor.submit(this::serverLoop);
-
+            start();
             System.out.println("Server started");
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void serverLoop() {
+    @Override
+    public void run() {
         while (running) {
             try {
-                if (selector.select() == 0) continue;
+                selector.select();
+                if (!running) break;
 
-                Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
-                while (keys.hasNext()) {
-                    SelectionKey key = keys.next();
-                    keys.remove();
+                Set<SelectionKey> selectedKeys = selector.selectedKeys();
+                Iterator<SelectionKey> iter = selectedKeys.iterator();
+
+                while (iter.hasNext()) {
+                    SelectionKey key = iter.next();
+                    iter.remove();
 
                     if (!key.isValid()) continue;
 
                     if (key.isAcceptable()) {
-                        accept(key);
-                    } else if (key.isReadable()) {
-                        read(key);
+                        SocketChannel client = serverChannel.accept();
+                        client.configureBlocking(false);
+                        client.register(selector, SelectionKey.OP_READ);
+                    }
+
+                    if (key.isReadable()) {
+                        SocketChannel client = (SocketChannel) key.channel();
+                        handleRead(client);
                     }
                 }
             } catch (IOException e) {
-                e.printStackTrace();
+                if (running) {
+                    e.printStackTrace();
+                }
             }
         }
     }
 
-    private void accept(SelectionKey key) throws IOException {
-        ServerSocketChannel serverChannel = (ServerSocketChannel) key.channel();
-        SocketChannel clientChannel = serverChannel.accept();
-        clientChannel.configureBlocking(false);
-        clientChannel.register(selector, SelectionKey.OP_READ);
-    }
-
-    private void read(SelectionKey key) throws IOException {
-        SocketChannel channel = (SocketChannel) key.channel();
+    private void handleRead(SocketChannel client) {
         ByteBuffer buffer = ByteBuffer.allocate(1024);
-        int read = 0;
-
         try {
-            read = channel.read(buffer);
-        } catch (IOException e) {
-            key.cancel();
-            channel.close();
-            return;
-        }
-
-        if (read == -1) {
-            handleLogout(channel);
-            key.cancel();
-            channel.close();
-            return;
-        }
-
-        buffer.flip();
-        String message = StandardCharsets.UTF_8.decode(buffer).toString();
-        handleMessage(channel, message);
-    }
-
-    private void handleMessage(SocketChannel channel, String message) {
-        if (message.startsWith("LOGIN ")) {
-            String clientId = message.substring(6);
-            clients.put(channel, clientId);
-            logAndBroadcast(clientId + " logged in");
-        } else if (message.equals("LOGOUT")) {
-            handleLogout(channel);
-        } else {
-            String clientId = clients.get(channel);
-            if (clientId != null) {
-                logAndBroadcast(clientId + ": " + message);
+            int bytesRead = client.read(buffer);
+            if (bytesRead == -1) {
+                removeClient(client);
+                return;
             }
+
+            buffer.flip();
+            String message = StandardCharsets.UTF_8.decode(buffer).toString();
+            String[] parts = message.split("\\|");
+            String command = parts[0];
+            String content = parts.length > 1 ? parts[1] : "";
+
+            switch (command) {
+                case "LOGIN":
+                    handleLogin(client, content);
+                    break;
+                case "LOGOUT":
+                    handleLogout(client);
+                    break;
+                case "MESSAGE":
+                    broadcastMessage(client, content);
+                    break;
+            }
+        } catch (IOException e) {
+            removeClient(client);
         }
     }
 
-    private void handleLogout(SocketChannel channel) {
-        String clientId = clients.get(channel);
+    private void handleLogin(SocketChannel client, String clientId) {
+        clients.put(client, clientId);
+        String logMessage = clientId + " logged in";
+        logServerMessage(logMessage);
+        broadcastToAll(logMessage, null);
+    }
+
+    private void handleLogout(SocketChannel client) {
+        removeClient(client);
+    }
+
+    private void removeClient(SocketChannel client) {
+        String clientId = clients.remove(client);
         if (clientId != null) {
-            logAndBroadcast(clientId + " logged out");
-            clients.remove(channel);
+            try {
+                client.close();
+                String logMessage = clientId + " logged out";
+                logServerMessage(logMessage);
+                broadcastToAll(logMessage, client);
+            } catch (IOException ignored) {}
         }
     }
 
-    private void logAndBroadcast(String message) {
-        String timestamp = timeFormat.format(new Date());
-        String logMessage = timestamp + " " + message;
-        serverLog.append(logMessage).append("\n");
+    private void broadcastMessage(SocketChannel sender, String message) {
+        String clientId = clients.get(sender);
+        if (clientId != null) {
+            String fullMessage = clientId + ": " + message;
+            logServerMessage(fullMessage);
+            broadcastToAll(fullMessage, null);
+        }
+    }
 
+    private void broadcastToAll(String message, SocketChannel exclude) {
         ByteBuffer buffer = ByteBuffer.wrap((message + "\n").getBytes(StandardCharsets.UTF_8));
-        for (Map.Entry<SocketChannel, String> entry : clients.entrySet()) {
+
+        for (SocketChannel client : new ArrayList<>(clients.keySet())) {
+            if (client.equals(exclude)) continue;
+
             try {
                 buffer.rewind();
-                entry.getKey().write(buffer);
+                client.write(buffer);
             } catch (IOException e) {
-                e.printStackTrace();
+                clients.remove(client);
             }
         }
+    }
+
+    private void logServerMessage(String message) {
+        String timestamp = timeFormat.format(new Date());
+        serverLog.append(timestamp).append(" ").append(message).append("\n");
     }
 
     public void stopServer() {
         running = false;
         try {
-            if (selector != null) selector.close();
-            if (serverChannel != null) serverChannel.close();
-            if (executor != null) executor.shutdown();
+            // Zamykamy połączenia klientów
+            for (SocketChannel client : new ArrayList<>(clients.keySet())) {
+                removeClient(client);
+            }
+
+            if (selector != null) {
+                selector.wakeup();
+                selector.close();
+            }
+            if (serverChannel != null) {
+                serverChannel.close();
+            }
+            join();
             System.out.println("\nServer stopped");
-        } catch (IOException e) {
+        } catch (IOException | InterruptedException e) {
             e.printStackTrace();
         }
     }
