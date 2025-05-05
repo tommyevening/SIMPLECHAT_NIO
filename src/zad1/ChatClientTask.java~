@@ -8,7 +8,6 @@ package zad1;
 
 import java.util.List;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 public class ChatClientTask implements Runnable {
@@ -44,12 +43,7 @@ public class ChatClientTask implements Runnable {
 
             client.logout();
             if (wait != 0) TimeUnit.MILLISECONDS.sleep(wait);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
         }
-    }
-
-    public void get() throws InterruptedException, ExecutionException {
-        client.getChatView();
+        return client.getChatView();
     }
 }

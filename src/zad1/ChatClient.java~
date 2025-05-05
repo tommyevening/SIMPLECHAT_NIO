@@ -10,7 +10,6 @@ package zad1;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
@@ -69,7 +68,6 @@ public class ChatClient {
             }
 
             ByteBuffer readBuffer = ByteBuffer.allocate(1024);
-            StringBuilder response = new StringBuilder();
 
             while (socketChannel.read(readBuffer) > 0) {
                 readBuffer.flip();

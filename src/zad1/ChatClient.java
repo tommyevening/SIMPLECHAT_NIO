@@ -6,84 +6,105 @@
 
 package zad1;
 
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.ClosedChannelException;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 public class ChatClient {
-
     private String host;
     private int port;
-    private String id;
-
-    private SocketChannel socketChannel;
-    private Selector selector;
-    private StringBuilder chatHistory;
-
+    private String clientId;
+    private SocketChannel channel;
+    private StringBuilder chatView;
+    private BlockingQueue<String> messageQueue;
+    private Thread readThread;
+    private volatile boolean running;
 
     public ChatClient(String host, int port, String id) {
         this.host = host;
         this.port = port;
-        this.id = id;
-        chatHistory = new StringBuilder();
+        this.clientId = id;
+        this.chatView = new StringBuilder();
+        this.messageQueue = new LinkedBlockingQueue<>();
     }
 
-    public void connect() {
-        try
-         {
-             socketChannel = SocketChannel.open();
-             selector = Selector.open();
+    public void login() {
+        try {
+            channel = SocketChannel.open(new InetSocketAddress(host, port));
+            channel.configureBlocking(false);
+            send("LOGIN " + clientId);
 
-            socketChannel.configureBlocking(false);
-            socketChannel.register(selector, SelectionKey.OP_CONNECT);
-            socketChannel.connect(new InetSocketAddress(host, port));
+            running = true;
+            readThread = new Thread(this::readMessages);
+            readThread.start();
+        } catch (IOException e) {
+            chatView.append("*** ").append(e.toString()).append("\n");
+        }
+    }
 
-            while (socketChannel.finishConnect()) {
-                if (selector.select() == 0) continue;
-
-                for (SelectionKey key : selector.selectedKeys()) {
-                    if (key.isConnectable()) {
-                        socketChannel.finishConnect();
-                        break;
-                    }
-                }
-                selector.selectedKeys().clear();
+    public void logout() {
+        try {
+            send("LOGOUT");
+            running = false;
+            if (channel != null) {
+                channel.close();
             }
-        }catch (IOException e) {
-            throw new RuntimeException(e);
+            if (readThread != null) {
+                readThread.interrupt();
+            }
+        } catch (IOException e) {
+            chatView.append("*** ").append(e.toString()).append("\n");
         }
     }
 
     public void send(String req) {
         try {
-            ByteBuffer writeBuffer = ByteBuffer.wrap((req + "\n").getBytes(StandardCharsets.UTF_8));
-
-            while (writeBuffer.hasRemaining()) {
-                socketChannel.write(writeBuffer);
+            ByteBuffer buffer = ByteBuffer.wrap(req.getBytes(StandardCharsets.UTF_8));
+            while (buffer.hasRemaining()) {
+                channel.write(buffer);
             }
-
-            ByteBuffer readBuffer = ByteBuffer.allocate(1024);
-
-            while (socketChannel.read(readBuffer) > 0) {
-                readBuffer.flip();
-                String recvedMessage = StandardCharsets.UTF_8.decode(readBuffer).toString();
-                chatHistory.append(recvedMessage);
-                readBuffer.clear();
-            }
-
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            chatView.append("*** ").append(e.toString()).append("\n");
         }
     }
 
-    public String getChatView(){
+    private void readMessages() {
+        ByteBuffer buffer = ByteBuffer.allocate(1024);
+        StringBuilder messageBuilder = new StringBuilder();
 
-        return chatHistory.toString().trim();
+        while (running) {
+            try {
+                buffer.clear();
+                int read = channel.read(buffer);
+
+                if (read > 0) {
+                    buffer.flip();
+                    String received = StandardCharsets.UTF_8.decode(buffer).toString();
+                    messageBuilder.append(received);
+
+                    int newlineIndex;
+                    while ((newlineIndex = messageBuilder.indexOf("\n")) != -1) {
+                        String message = messageBuilder.substring(0, newlineIndex);
+                        chatView.append(message).append("\n");
+                        messageBuilder.delete(0, newlineIndex + 1);
+                    }
+                }
+
+                Thread.sleep(100);
+            } catch (IOException | InterruptedException e) {
+                if (running) {
+                    chatView.append("*** ").append(e.toString()).append("\n");
+                }
+                break;
+            }
+        }
+    }
+
+    public String getChatView() {
+        return "=== " + clientId + " chat view\n" + chatView.toString();
     }
 }
